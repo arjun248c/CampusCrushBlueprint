@@ -1,21 +1,42 @@
 import { Heart, Shield, Trophy, Users, CheckCircle, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import heroImage from "@assets/generated_images/Campus_hero_background_image_273e9713.png";
+import { LoginForm } from "@/components/LoginForm";
+import { RegistrationFlow } from "@/components/RegistrationFlow";
+import { useState } from "react";
+
+type ViewState = "landing" | "login" | "register";
 
 export default function Landing() {
+  const [currentView, setCurrentView] = useState<ViewState>("landing");
+
+  if (currentView === "login") {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <LoginForm 
+            onSuccess={() => setCurrentView("landing")} 
+            onNeedAccount={() => setCurrentView("register")}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (currentView === "register") {
+    return (
+      <RegistrationFlow 
+        onBack={() => setCurrentView("landing")}
+        onSuccess={() => setCurrentView("landing")}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background">
       {/* Hero Section */}
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
-        {/* Background Image with Dark Wash */}
-        <div className="absolute inset-0 z-0">
-          <img
-            src={heroImage}
-            alt="Campus students"
-            className="w-full h-full object-cover"
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/60 to-black/40" />
-        </div>
+        {/* Background with Gradient */}
+        <div className="absolute inset-0 z-0 bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900" />
 
         {/* Content */}
         <div className="relative z-10 w-full max-w-7xl mx-auto px-4 py-24 text-center">
@@ -30,7 +51,7 @@ export default function Landing() {
               size="lg"
               className="h-14 px-8 text-lg bg-gradient-to-r from-purple-600 to-pink-600 hover:shadow-xl text-white border-0"
               data-testid="button-get-started"
-              onClick={() => window.location.href = "/api/login"}
+              onClick={() => setCurrentView("login")}
             >
               <Heart className="mr-2 size-5" />
               Get Started
@@ -90,54 +111,7 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* Features */}
-      <section className="py-24 bg-muted/30">
-        <div className="max-w-7xl mx-auto px-4">
-          <h2 className="text-4xl font-bold font-display text-center mb-16">Why Campus Crush?</h2>
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {[
-              {
-                icon: Shield,
-                title: "100% Anonymous",
-                description: "Your ratings are completely private. No one knows who rated whom."
-              },
-              {
-                icon: CheckCircle,
-                title: "College Verified",
-                description: "Only verified students from your college can participate."
-              },
-              {
-                icon: Trophy,
-                title: "Weekly Leaderboards",
-                description: "Fresh rankings every week. Compete with your peers for the top spot."
-              },
-              {
-                icon: Heart,
-                title: "Safe & Respectful",
-                description: "Built-in moderation and reporting to keep the community positive."
-              },
-              {
-                icon: Users,
-                title: "Campus Exclusive",
-                description: "Only see and rate students from your own university."
-              },
-              {
-                icon: Star,
-                title: "Fair Rating System",
-                description: "Sophisticated algorithms prevent abuse and ensure fairness."
-              }
-            ].map((feature, i) => (
-              <div key={i} className="p-6 rounded-xl bg-card border border-card-border hover-elevate" data-testid={`feature-${i}`}>
-                <div className="size-12 rounded-lg bg-primary/10 flex items-center justify-center mb-4">
-                  <feature.icon className="size-6 text-primary" />
-                </div>
-                <h3 className="text-xl font-semibold mb-2">{feature.title}</h3>
-                <p className="text-muted-foreground text-sm">{feature.description}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+
 
       {/* CTA Section */}
       <section className="py-24 bg-gradient-to-r from-purple-600 to-pink-600">
@@ -152,7 +126,7 @@ export default function Landing() {
             size="lg"
             className="h-14 px-8 text-lg bg-white text-purple-600 hover:bg-white/90"
             data-testid="button-cta-signup"
-            onClick={() => window.location.href = "/api/login"}
+            onClick={() => setCurrentView("login")}
           >
             Get Started Free
           </Button>

@@ -4,25 +4,36 @@ import {
   colleges,
   ratings,
   leaderboards,
+  appeals,
+  feedback,
+  rateLimits,
   type User,
   type UpsertUser,
   type College,
   type InsertCollege,
   type Rating,
   type Leaderboard,
-} from "@shared/schema";
+  type Appeal,
+  type InsertAppeal,
+  type Feedback,
+  type InsertFeedback,
+} from "../shared/schema";
 import { db } from "./db";
 import { eq, and, desc, sql, ne, inArray } from "drizzle-orm";
 import { createHash } from "crypto";
 
+
+
 // Interface for storage operations
 export interface IStorage {
-  // User operations (MANDATORY for Replit Auth)
+  // User operations
   getUser(id: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
   upsertUser(user: UpsertUser): Promise<User>;
   
   // Profile operations
   updateUserProfile(id: string, data: Partial<User>): Promise<User | undefined>;
+  saveProfileImage(userId: string, file: Express.Multer.File): Promise<string>;
   
   // College operations
   getAllColleges(): Promise<College[]>;
@@ -31,11 +42,26 @@ export interface IStorage {
   
   // Profile discovery
   getRandomProfiles(userId: string, limit: number): Promise<User[]>;
+  searchProfiles(userId: string, query: string, limit: number): Promise<User[]>;
   
   // Rating operations
   createRating(targetUserId: string, raterUserId: string, score: number, metadata: { ipHash?: string; deviceHash?: string; collegeId?: string }): Promise<Rating>;
   getUserRatings(userId: string): Promise<Rating[]>;
   updateUserStats(userId: string): Promise<void>;
+  checkDuplicateRating(raterUserId: string, targetUserId: string): Promise<boolean>;
+  
+  // Appeals system
+  createAppeal(userId: string, appealData: InsertAppeal): Promise<Appeal>;
+  getUserAppeals(userId: string): Promise<Appeal[]>;
+  
+  // Rate limiting
+  checkRateLimit(userId: string, ipHash: string, action: string): Promise<boolean>;
+  recordAction(userId: string, ipHash: string, action: string): Promise<void>;
+  
+  // Feedback system
+  createFeedback(userId: string, feedbackData: InsertFeedback): Promise<Feedback>;
+  getUserFeedback(userId: string): Promise<Feedback[]>;
+  getAllFeedback(limit?: number): Promise<Feedback[]>;
   
   // Leaderboard operations
   getLeaderboard(collegeId: string, periodType?: string): Promise<(Leaderboard & { user?: User })[]>;
@@ -52,6 +78,11 @@ export class DatabaseStorage implements IStorage {
   // User operations (MANDATORY for Replit Auth)
   async getUser(id: string): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email));
     return user;
   }
 
@@ -78,6 +109,26 @@ export class DatabaseStorage implements IStorage {
       .where(eq(users.id, id))
       .returning();
     return updated;
+  }
+
+  async saveProfileImage(userId: string, file: Express.Multer.File): Promise<string> {
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    
+    // Create uploads directory if it doesn't exist
+    const uploadsDir = path.join(process.cwd(), 'uploads', 'profiles');
+    await fs.mkdir(uploadsDir, { recursive: true });
+    
+    // Generate unique filename
+    const ext = path.extname(file.originalname);
+    const filename = `${userId}-${Date.now()}${ext}`;
+    const filepath = path.join(uploadsDir, filename);
+    
+    // Save file
+    await fs.writeFile(filepath, file.buffer);
+    
+    // Return URL path
+    return `/uploads/profiles/${filename}`;
   }
 
   // College operations
@@ -124,6 +175,40 @@ export class DatabaseStorage implements IStorage {
     return profiles;
   }
 
+  // Search profiles by name or display name
+  async searchProfiles(userId: string, query: string, limit: number = 20): Promise<User[]> {
+    const [currentUser] = await db.select().from(users).where(eq(users.id, userId));
+    if (!currentUser) return [];
+
+    // Determine opposite gender
+    let oppositeGender: string | null = null;
+    if (currentUser.gender === "male") oppositeGender = "female";
+    else if (currentUser.gender === "female") oppositeGender = "male";
+    else return []; // For "other" gender, no opposite gender matching for now
+
+    // Search profiles by first name, last name, or display name
+    const profiles = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.collegeId, currentUser.collegeId!),
+          eq(users.gender, oppositeGender),
+          eq(users.verificationStatus, "verified"),
+          ne(users.id, userId),
+          sql`(
+            LOWER(${users.firstName}) LIKE LOWER(${'%' + query + '%'}) OR
+            LOWER(${users.lastName}) LIKE LOWER(${'%' + query + '%'}) OR
+            LOWER(${users.displayName}) LIKE LOWER(${'%' + query + '%'})
+          )`
+        )
+      )
+      .orderBy(users.firstName, users.lastName)
+      .limit(limit);
+
+    return profiles;
+  }
+
   // Rating operations
   async createRating(
     targetUserId: string,
@@ -132,6 +217,12 @@ export class DatabaseStorage implements IStorage {
     metadata: { ipHash?: string; deviceHash?: string; collegeId?: string }
   ): Promise<Rating> {
     const raterIdHash = hashRaterId(raterUserId);
+    
+    // Check for duplicate rating
+    const isDuplicate = await this.checkDuplicateRating(raterUserId, targetUserId);
+    if (isDuplicate) {
+      throw new Error("You have already rated this user");
+    }
     
     const [rating] = await db
       .insert(ratings)
@@ -149,6 +240,21 @@ export class DatabaseStorage implements IStorage {
     await this.updateUserStats(targetUserId);
 
     return rating;
+  }
+
+  async checkDuplicateRating(raterUserId: string, targetUserId: string): Promise<boolean> {
+    const raterIdHash = hashRaterId(raterUserId);
+    const [existing] = await db
+      .select()
+      .from(ratings)
+      .where(
+        and(
+          eq(ratings.raterIdHash, raterIdHash),
+          eq(ratings.targetUserId, targetUserId)
+        )
+      )
+      .limit(1);
+    return !!existing;
   }
 
   async getUserRatings(userId: string): Promise<Rating[]> {
@@ -176,7 +282,7 @@ export class DatabaseStorage implements IStorage {
         .update(users)
         .set({
           ratingsReceived: stats.count,
-          averageScore: stats.avg,
+          averageScore: parseFloat(stats.avg),
           updatedAt: new Date(),
         })
         .where(eq(users.id, userId));
@@ -267,6 +373,97 @@ export class DatabaseStorage implements IStorage {
 
       await db.insert(leaderboards).values(leaderboardData);
     }
+  }
+
+  // Appeals system
+  async createAppeal(userId: string, appealData: InsertAppeal): Promise<Appeal> {
+    const [appeal] = await db
+      .insert(appeals)
+      .values({
+        ...appealData,
+        userId,
+      })
+      .returning();
+    return appeal;
+  }
+
+  async getUserAppeals(userId: string): Promise<Appeal[]> {
+    return await db
+      .select()
+      .from(appeals)
+      .where(eq(appeals.userId, userId))
+      .orderBy(desc(appeals.createdAt));
+  }
+
+  // Rate limiting
+  async checkRateLimit(userId: string, ipHash: string, action: string): Promise<boolean> {
+    const now = new Date();
+    const windowStart = new Date(now.getTime() - 60 * 1000); // 1 minute window
+    
+    const [existing] = await db
+      .select()
+      .from(rateLimits)
+      .where(
+        and(
+          eq(rateLimits.userId, userId),
+          eq(rateLimits.action, action),
+          sql`${rateLimits.expiresAt} > ${now}`
+        )
+      )
+      .limit(1);
+    
+    return existing && (existing.count || 0) >= 10; // Max 10 actions per minute
+  }
+
+  async recordAction(userId: string, ipHash: string, action: string): Promise<void> {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 60 * 1000); // 1 minute from now
+    
+    await db
+      .insert(rateLimits)
+      .values({
+        userId,
+        ipHash,
+        action,
+        count: 1,
+        windowStart: now,
+        expiresAt,
+      })
+      .onConflictDoUpdate({
+        target: [rateLimits.userId, rateLimits.action],
+        set: {
+          count: sql`${rateLimits.count} + 1`,
+          expiresAt,
+        },
+      });
+  }
+
+  // Feedback system
+  async createFeedback(userId: string, feedbackData: InsertFeedback): Promise<Feedback> {
+    const [feedbackRecord] = await db
+      .insert(feedback)
+      .values({
+        ...feedbackData,
+        userId,
+      })
+      .returning();
+    return feedbackRecord;
+  }
+
+  async getUserFeedback(userId: string): Promise<Feedback[]> {
+    return await db
+      .select()
+      .from(feedback)
+      .where(eq(feedback.userId, userId))
+      .orderBy(desc(feedback.createdAt));
+  }
+
+  async getAllFeedback(limit: number = 50): Promise<Feedback[]> {
+    return await db
+      .select()
+      .from(feedback)
+      .orderBy(desc(feedback.createdAt))
+      .limit(limit);
   }
 }
 

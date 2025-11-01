@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Heart, Trophy, User, LogOut, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import Discovery from "@/components/Discovery";
 import Leaderboard from "@/components/Leaderboard";
 import Profile from "@/pages/Profile";
-import OnboardingFlow from "@/components/OnboardingFlow";
+
 import type { User as UserType, Leaderboard as LeaderboardType } from "@shared/schema";
 
 type Tab = "discover" | "leaderboard" | "profile";
@@ -18,26 +18,56 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("discover");
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
 
-  // Check if user needs onboarding
+  // No onboarding needed since everything is handled in registration flow
   useEffect(() => {
-    if (user && (!user.collegeId || !user.gender)) {
-      setNeedsOnboarding(true);
-    }
+    setNeedsOnboarding(false);
   }, [user]);
 
   // Fetch leaderboard data
   const { data: leaderboardData = [] } = useQuery<(LeaderboardType & { user?: UserType })[]>({
     queryKey: ["/api/leaderboard"],
+    queryFn: async () => {
+      const response = await fetch("/api/leaderboard");
+      if (!response.ok) throw new Error("Failed to fetch leaderboard");
+      return response.json();
+    },
     enabled: !!user && !needsOnboarding,
   });
 
-  const handleLogout = () => {
-    window.location.href = "/api/logout";
+
+
+  const queryClient = useQueryClient();
+
+  const handleLogout = async () => {
+    try {
+      const response = await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      });
+      
+      if (response.ok) {
+        // Clear all cached queries
+        queryClient.clear();
+        // Force a page reload to reset the app state
+        window.location.reload();
+      } else {
+        toast({
+          title: "Logout failed",
+          description: "Please try again",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error("Logout error:", error);
+      toast({
+        title: "Logout failed",
+        description: "Please try again",
+        variant: "destructive",
+      });
+    }
   };
 
-  if (needsOnboarding) {
-    return <OnboardingFlow onComplete={() => setNeedsOnboarding(false)} />;
-  }
+
 
   const displayName = user?.displayName || `${user?.firstName || ""} ${user?.lastName || ""}`.trim() || "User";
 

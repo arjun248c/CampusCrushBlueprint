@@ -1,53 +1,35 @@
-import { db } from "./db";
-import { colleges } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import 'dotenv/config';
+import { db } from './db';
+import { colleges } from '../shared/schema';
 
-const collegesData = [
-  { name: "Stanford University", emailDomain: "stanford.edu" },
-  { name: "Harvard University", emailDomain: "harvard.edu" },
-  { name: "MIT", emailDomain: "mit.edu" },
-  { name: "UC Berkeley", emailDomain: "berkeley.edu" },
-  { name: "Yale University", emailDomain: "yale.edu" },
-  { name: "Princeton University", emailDomain: "princeton.edu" },
-  { name: "Columbia University", emailDomain: "columbia.edu" },
-  { name: "University of Pennsylvania", emailDomain: "upenn.edu" },
-  { name: "Cornell University", emailDomain: "cornell.edu" },
-  { name: "Brown University", emailDomain: "brown.edu" },
-  { name: "Duke University", emailDomain: "duke.edu" },
-  { name: "Northwestern University", emailDomain: "northwestern.edu" },
-  { name: "UCLA", emailDomain: "ucla.edu" },
-  { name: "USC", emailDomain: "usc.edu" },
-  { name: "NYU", emailDomain: "nyu.edu" },
-];
+async function seedDatabase() {
+  console.log('Seeding database...');
 
-async function seed() {
-  console.log("Seeding colleges...");
-
-  for (const college of collegesData) {
-    try {
-      // Check if college already exists
-      const existing = await db
-        .select()
-        .from(colleges)
-        .where(eq(colleges.emailDomain, college.emailDomain))
-        .limit(1);
-
-      if (existing.length === 0) {
-        await db.insert(colleges).values(college);
-        console.log(`✓ Added ${college.name}`);
-      } else {
-        console.log(`- ${college.name} already exists`);
+  try {
+    // Insert SGGS college only
+    const sampleColleges = [
+      {
+        name: 'Shri Guru Gobind Singh Ji Institute of Engineering and Technology, Vishnupuri, Nanded-431606',
+        emailDomain: 'sggs.ac.in',
+        isActive: true,
       }
-    } catch (error) {
-      console.error(`✗ Error adding ${college.name}:`, error);
-    }
-  }
+    ];
 
-  console.log("Seeding complete!");
-  process.exit(0);
+    // Clear existing colleges and insert only SGGS
+    await db.delete(colleges);
+    await db.insert(colleges).values(sampleColleges);
+    console.log('✅ SGGS college configured successfully');
+
+    console.log('Database seeding completed!');
+  } catch (error) {
+    console.error('Error seeding database:', error);
+    process.exit(1);
+  }
 }
 
-seed().catch((error) => {
-  console.error("Seed failed:", error);
-  process.exit(1);
-});
+// Run if called directly
+if (import.meta.url === `file://${process.argv[1]}`) {
+  seedDatabase().then(() => process.exit(0));
+}
+
+export { seedDatabase };

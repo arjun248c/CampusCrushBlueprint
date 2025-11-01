@@ -1,16 +1,32 @@
-// From PostgreSQL database blueprint
-import { Pool, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-serverless';
-import ws from "ws";
-import * as schema from "@shared/schema";
-
-neonConfig.webSocketConstructor = ws;
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+import * as schema from '../shared/schema';
 
 if (!process.env.DATABASE_URL) {
-  throw new Error(
-    "DATABASE_URL must be set. Did you forget to provision a database?",
-  );
+  throw new Error('DATABASE_URL environment variable is required');
 }
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-export const db = drizzle({ client: pool, schema });
+// Create Supabase connection
+const client = postgres(process.env.DATABASE_URL, {
+  max: 20, // Maximum number of connections
+  idle_timeout: 30, // Close idle connections after 30 seconds
+  connect_timeout: 10, // Connection timeout in seconds
+});
+
+// Create Drizzle database instance
+export const db = drizzle(client, { schema });
+
+console.log('Database connected: Supabase with Drizzle ORM');
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Closing database connection...');
+  await client.end();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('Closing database connection...');
+  await client.end();
+  process.exit(0);
+});

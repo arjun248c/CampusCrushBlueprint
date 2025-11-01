@@ -1,4 +1,6 @@
-import { Trophy, Crown, Medal } from "lucide-react";
+import { Trophy, Crown, Medal, Info } from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Leaderboard as LeaderboardType, User } from "@shared/schema";
 
 interface LeaderboardEntry extends LeaderboardType {
@@ -11,8 +13,12 @@ interface LeaderboardProps {
 }
 
 export default function Leaderboard({ entries, title = "Weekly Leaderboard" }: LeaderboardProps) {
+  const { user } = useAuth();
   const topThree = entries.slice(0, 3);
   const restOfList = entries.slice(3, 10);
+  
+  // Check if current user is in top 10
+  const userInTop10 = entries.some(entry => entry.userId === user?.id);
 
   const getUserDisplayName = (user?: User) => {
     if (!user) return "Anonymous";
@@ -25,6 +31,16 @@ export default function Leaderboard({ entries, title = "Weekly Leaderboard" }: L
         <h2 className="text-3xl font-bold font-display flex items-center gap-3">
           <Trophy className="size-8 text-primary" />
           {title}
+          {!userInTop10 && user && (
+            <Tooltip>
+              <TooltipTrigger>
+                <Info className="size-5 text-muted-foreground hover:text-primary cursor-help" />
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>You were very close! Let's try again next week</p>
+              </TooltipContent>
+            </Tooltip>
+          )}
         </h2>
         <p className="text-muted-foreground mt-2">Top performers this week</p>
       </div>
@@ -46,7 +62,7 @@ export default function Leaderboard({ entries, title = "Weekly Leaderboard" }: L
               <div className="mt-3 text-center">
                 <div className="text-lg font-semibold">{getUserDisplayName(topThree[1].user)}</div>
                 <div className="text-2xl font-bold font-display text-primary">
-                  {parseFloat(topThree[1].averageScore).toFixed(1)}
+                  {Number(topThree[1].averageScore).toFixed(1)}
                 </div>
                 <div className="text-xs text-muted-foreground">
                   {topThree[1].totalRatings} ratings
@@ -69,7 +85,7 @@ export default function Leaderboard({ entries, title = "Weekly Leaderboard" }: L
               <div className="mt-3 text-center">
                 <div className="text-xl font-bold">{getUserDisplayName(topThree[0].user)}</div>
                 <div className="text-4xl font-bold font-display bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">
-                  {parseFloat(topThree[0].averageScore).toFixed(1)}
+                  {Number(topThree[0].averageScore).toFixed(1)}
                 </div>
                 <div className="text-sm text-muted-foreground">
                   {topThree[0].totalRatings} ratings
@@ -92,7 +108,7 @@ export default function Leaderboard({ entries, title = "Weekly Leaderboard" }: L
               <div className="mt-3 text-center">
                 <div className="text-lg font-semibold">{getUserDisplayName(topThree[2].user)}</div>
                 <div className="text-2xl font-bold font-display text-primary">
-                  {parseFloat(topThree[2].averageScore).toFixed(1)}
+                  {Number(topThree[2].averageScore).toFixed(1)}
                 </div>
                 <div className="text-xs text-muted-foreground">
                   {topThree[2].totalRatings} ratings
@@ -127,7 +143,7 @@ export default function Leaderboard({ entries, title = "Weekly Leaderboard" }: L
                 </p>
               </div>
               <span className="text-2xl font-bold font-display text-primary">
-                {parseFloat(entry.averageScore).toFixed(1)}
+                {Number(entry.averageScore).toFixed(1)}
               </span>
             </div>
           ))}

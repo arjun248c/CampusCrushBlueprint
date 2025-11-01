@@ -1,0 +1,32 @@
+{
+  "users": [
+    {
+      "email": "arjunchavan248@gmail.com",
+      "firstName": "arjun",
+      "lastName": "chavan",
+      "id": "d7970b0c-89bf-4941-9a9a-dfc72fc187b4",
+      "createdAt": "2025-10-29T07:22:28.783Z",
+      "collegeId": "1451ea2d-f119-4c44-beb0-11aea720158e",
+      "gender": "male",
+      "displayName": "coolarjun",
+      "bio": "Crazy , lover boy",
+      "verificationStatus": "verified",
+      "lastActiveAt": "2025-10-29T07:23:16.541Z",
+      "updatedAt": "2025-10-29T07:23:16.541Z"
+    }
+  ],
+  "colleges": [
+    {
+      "id": "1451ea2d-f119-4c44-beb0-11aea720158e",
+      "name": "Demo University",
+      "emailDomain": "demo.edu",
+      "isActive": true,
+      "createdAt": "2025-10-29T07:02:20.502Z"
+    }
+  ],
+  "ratings": [],
+  "ratingPairs": [],
+  "appeals": [],
+  "feedback": [],
+  "sessions": []
+}

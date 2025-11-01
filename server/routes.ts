@@ -1,20 +1,56 @@
-// From Replit Auth blueprint with Campus Crush endpoints
 import type { Express, Request } from "express";
+import express from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated } from "./replitAuth";
-import { insertRatingSchema } from "@shared/schema";
+import { insertRatingSchema, insertAppealSchema, insertFeedbackSchema } from "@shared/schema";
 import { createHash } from "crypto";
 import rateLimit from "express-rate-limit";
+import { monitoring } from "./monitoring";
+import session from "express-session";
+import MemoryStore from "memorystore";
+import multer from "multer";
+import path from "path";
+
+const MemoryStoreSession = MemoryStore(session);
 
 // Helper to get user ID from request
 function getUserId(req: any): string {
-  return req.user?.claims?.sub;
+  return req.session?.userId;
+}
+
+// Simple auth middleware
+function isAuthenticated(req: any, res: any, next: any) {
+  if (req.session?.userId) {
+    return next();
+  }
+  res.status(401).json({ message: "Authentication required" });
 }
 
 // Helper to hash IP/device for abuse prevention
 function hashValue(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+// Enhanced rate limiting middleware
+async function checkCustomRateLimit(req: any, res: any, next: any, action: string) {
+  try {
+    const userId = getUserId(req);
+    const ipHash = req.ip ? hashValue(req.ip) : "unknown";
+    
+    if (userId) {
+      const isLimited = await storage.checkRateLimit(userId, ipHash, action);
+      if (isLimited) {
+        return res.status(429).json({ message: `Too many ${action} attempts. Please slow down.` });
+      }
+      
+      await storage.recordAction(userId, ipHash, action);
+    }
+    
+    next();
+  } catch (error) {
+    console.error(`Rate limit check failed for ${action}:`, error);
+    next(); // Continue on error to avoid blocking legitimate requests
+  }
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -43,22 +79,101 @@ export async function registerRoutes(app: Express): Promise<Server> {
     legacyHeaders: false,
   });
 
-  // Apply general rate limiting to all API routes
+  // Serve uploaded files
+  app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+  // Apply monitoring and rate limiting to all API routes
+  app.use("/api", monitoring.performanceMiddleware());
   app.use("/api", apiLimiter);
 
-  // Auth middleware
-  await setupAuth(app);
+  // Session middleware
+  app.use(session({
+    store: new MemoryStoreSession({
+      checkPeriod: 86400000 // prune expired entries every 24h
+    }),
+    secret: process.env.SESSION_SECRET || 'campus-crush-secret-key',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: process.env.NODE_ENV === 'production',
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+  }));
 
   // ============ Auth Routes ============
-  app.get("/api/auth/user", authLimiter, isAuthenticated, async (req: any, res) => {
+  app.post("/api/auth/login", authLimiter, async (req: any, res) => {
     try {
-      const userId = getUserId(req);
-      const user = await storage.getUser(userId);
-      res.json(user);
+      const { email, password } = req.body;
+      
+      if (!email || !password) {
+        return res.status(400).json({ message: "Email and password required" });
+      }
+      
+      // Simple demo login - in production, verify password hash
+      const user = await storage.getUserByEmail(email);
+      if (!user) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+      
+      req.session.userId = user.id;
+      res.json({ user, message: "Login successful" });
     } catch (error) {
-      console.error("Error fetching user:", error);
-      res.status(500).json({ message: "Failed to fetch user" });
+      console.error("Login error:", error);
+      res.status(500).json({ message: "Login failed" });
     }
+  });
+
+  app.post("/api/auth/register", authLimiter, async (req: any, res) => {
+    try {
+      const { email, firstName, lastName } = req.body;
+      
+      if (!email || !firstName) {
+        return res.status(400).json({ message: "Email and first name required" });
+      }
+      
+      const existingUser = await storage.getUserByEmail(email);
+      if (existingUser) {
+        return res.status(409).json({ message: "User already exists" });
+      }
+      
+      const user = await storage.upsertUser({
+        email,
+        firstName,
+        lastName,
+      });
+      
+      req.session.userId = user.id;
+      res.json({ user, message: "Registration successful" });
+    } catch (error) {
+      console.error("Registration error:", error);
+      res.status(500).json({ message: "Registration failed" });
+    }
+  });
+
+  app.get("/api/auth/user", 
+    (req, res, next) => checkCustomRateLimit(req, res, next, "login"),
+    authLimiter, 
+    isAuthenticated, 
+    async (req: any, res) => {
+      try {
+        const userId = getUserId(req);
+        const user = await storage.getUser(userId);
+        res.json(user);
+      } catch (error) {
+        console.error("Error fetching user:", error);
+        res.status(500).json({ message: "Failed to fetch user" });
+      }
+    }
+  );
+
+  app.post("/api/auth/logout", (req: any, res) => {
+    req.session.destroy((err: any) => {
+      if (err) {
+        return res.status(500).json({ message: "Logout failed" });
+      }
+      res.json({ message: "Logout successful" });
+    });
   });
 
   // ============ Profile Routes ============
@@ -73,25 +188,76 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/profile/setup", authLimiter, isAuthenticated, async (req: any, res) => {
+  // Configure multer for file uploads
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+      if (file.mimetype.startsWith('image/')) {
+        cb(null, true);
+      } else {
+        cb(new Error('Only image files are allowed'));
+      }
+    }
+  });
+
+  app.put("/api/profile", authLimiter, isAuthenticated, upload.single('profileImage'), async (req: any, res) => {
     try {
       const userId = getUserId(req);
-      const { collegeId, gender, displayName, bio } = req.body;
+      const { displayName, bio } = req.body;
+
+      let profileImageUrl = undefined;
+      if (req.file) {
+        profileImageUrl = await storage.saveProfileImage(userId, req.file);
+      }
+
+      const updateData: any = {};
+      if (displayName !== undefined) updateData.displayName = displayName;
+      if (bio !== undefined) updateData.bio = bio;
+      if (profileImageUrl) updateData.profileImageUrl = profileImageUrl;
+      updateData.updatedAt = new Date();
+
+      const updated = await storage.updateUserProfile(userId, updateData);
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating profile:", error);
+      res.status(500).json({ message: "Failed to update profile" });
+    }
+  });
+
+  app.post("/api/profile/setup", authLimiter, isAuthenticated, upload.single('profileImage'), async (req: any, res) => {
+    try {
+      const userId = getUserId(req);
+      const { collegeId, email, gender, displayName, bio } = req.body;
 
       // Basic validation
       if (!collegeId || typeof collegeId !== "string") {
         return res.status(400).json({ message: "Valid college ID is required" });
       }
+      if (!email || typeof email !== "string") {
+        return res.status(400).json({ message: "Valid email is required" });
+      }
+      if (!email.endsWith('@sggs.ac.in')) {
+        return res.status(400).json({ message: "Email must be from SGGS college (@sggs.ac.in)" });
+      }
       if (!gender || !["male", "female", "other"].includes(gender)) {
         return res.status(400).json({ message: "Valid gender is required" });
       }
 
+      let profileImageUrl = undefined;
+      if (req.file) {
+        // Save image and get URL
+        profileImageUrl = await storage.saveProfileImage(userId, req.file);
+      }
+
       const updated = await storage.updateUserProfile(userId, {
+        email,
         collegeId,
         gender,
         displayName: displayName || undefined,
         bio: bio || undefined,
-        verificationStatus: "verified", // Auto-verify for MVP (would check email domain in production)
+        profileImageUrl,
+        verificationStatus: "verified", // Auto-verify for SGGS email domain
         lastActiveAt: new Date(),
       });
 
@@ -114,90 +280,131 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ============ Discovery Routes ============
-  app.get("/api/profiles/random", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = getUserId(req);
-      const limit = parseInt(req.query.limit as string) || 10;
+  app.get("/api/profiles/random", 
+    (req, res, next) => checkCustomRateLimit(req, res, next, "profile_view"),
+    isAuthenticated, 
+    async (req: any, res) => {
+      try {
+        const userId = getUserId(req);
+        const limit = parseInt(req.query.limit as string) || 10;
 
-      // Check if user has completed onboarding
-      const user = await storage.getUser(userId);
-      if (!user?.collegeId || !user?.gender) {
-        return res.status(400).json({ message: "Please complete your profile first" });
+        // Check if user has completed onboarding
+        const user = await storage.getUser(userId);
+        if (!user?.collegeId || !user?.gender) {
+          return res.status(400).json({ message: "Please complete your profile first" });
+        }
+
+        const profiles = await storage.getRandomProfiles(userId, limit);
+        res.json(profiles);
+      } catch (error) {
+        console.error("Error fetching random profiles:", error);
+        res.status(500).json({ message: "Failed to fetch profiles" });
       }
-
-      const profiles = await storage.getRandomProfiles(userId, limit);
-      res.json(profiles);
-    } catch (error) {
-      console.error("Error fetching random profiles:", error);
-      res.status(500).json({ message: "Failed to fetch profiles" });
     }
-  });
+  );
+
+  app.get("/api/profiles/search", 
+    (req, res, next) => checkCustomRateLimit(req, res, next, "profile_search"),
+    isAuthenticated, 
+    async (req: any, res) => {
+      try {
+        const userId = getUserId(req);
+        const query = req.query.q as string;
+        const limit = parseInt(req.query.limit as string) || 20;
+
+        if (!query || query.trim().length < 2) {
+          return res.status(400).json({ message: "Search query must be at least 2 characters" });
+        }
+
+        // Check if user has completed onboarding
+        const user = await storage.getUser(userId);
+        if (!user?.collegeId || !user?.gender) {
+          return res.status(400).json({ message: "Please complete your profile first" });
+        }
+
+        const profiles = await storage.searchProfiles(userId, query.trim(), limit);
+        res.json(profiles);
+      } catch (error) {
+        console.error("Error searching profiles:", error);
+        res.status(500).json({ message: "Failed to search profiles" });
+      }
+    }
+  );
 
   // ============ Rating Routes ============
-  app.post("/api/ratings", ratingLimiter, isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = getUserId(req);
-      
-      // Validate input
-      const validation = insertRatingSchema.safeParse(req.body);
-      if (!validation.success) {
-        return res.status(400).json({ 
-          message: "Invalid rating data",
-          errors: validation.error.errors 
-        });
-      }
-
-      const { targetUserId, score } = validation.data;
-
-      // Prevent self-rating
-      if (targetUserId === userId) {
-        return res.status(400).json({ message: "You cannot rate yourself" });
-      }
-
-      // Get user and target user
-      const user = await storage.getUser(userId);
-      const targetUser = await storage.getUser(targetUserId);
-
-      if (!targetUser) {
-        return res.status(404).json({ message: "User not found" });
-      }
-
-      // Verify both users are from same college
-      if (user?.collegeId !== targetUser?.collegeId) {
-        return res.status(403).json({ message: "You can only rate users from your college" });
-      }
-
-      // Verify opposite gender
-      const isOppositeGender = 
-        (user?.gender === "male" && targetUser?.gender === "female") ||
-        (user?.gender === "female" && targetUser?.gender === "male");
-
-      if (!isOppositeGender) {
-        return res.status(403).json({ message: "You can only rate opposite gender students" });
-      }
-
-      // Create metadata for abuse prevention
-      const ipHash = req.ip ? hashValue(req.ip) : undefined;
-      const deviceHash = req.headers["user-agent"] ? hashValue(req.headers["user-agent"]) : undefined;
-
-      // Create rating
-      const rating = await storage.createRating(
-        targetUserId,
-        userId,
-        score,
-        {
-          ipHash,
-          deviceHash,
-          collegeId: user?.collegeId || undefined,
+  app.post("/api/ratings", 
+    (req, res, next) => checkCustomRateLimit(req, res, next, "rating"),
+    isAuthenticated, 
+    async (req: any, res) => {
+      try {
+        const userId = getUserId(req);
+        
+        // Validate input
+        const validation = insertRatingSchema.safeParse(req.body);
+        if (!validation.success) {
+          return res.status(400).json({ 
+            message: "Invalid rating data",
+            errors: validation.error.errors 
+          });
         }
-      );
 
-      res.json(rating);
-    } catch (error) {
-      console.error("Error creating rating:", error);
-      res.status(500).json({ message: "Failed to submit rating" });
+        const { targetUserId, score } = validation.data;
+
+        // Prevent self-rating
+        if (targetUserId === userId) {
+          return res.status(400).json({ message: "You cannot rate yourself" });
+        }
+
+        // Get user and target user
+        const user = await storage.getUser(userId);
+        const targetUser = await storage.getUser(targetUserId);
+
+        if (!targetUser) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        // Verify both users are from same college
+        if (user?.collegeId !== targetUser?.collegeId) {
+          return res.status(403).json({ message: "You can only rate users from your college" });
+        }
+
+        // Verify opposite gender
+        const isOppositeGender = 
+          (user?.gender === "male" && targetUser?.gender === "female") ||
+          (user?.gender === "female" && targetUser?.gender === "male");
+
+        if (!isOppositeGender) {
+          return res.status(403).json({ message: "You can only rate opposite gender students" });
+        }
+
+        // Create metadata for abuse prevention
+        const ipHash = req.ip ? hashValue(req.ip) : undefined;
+        const deviceHash = req.headers["user-agent"] ? hashValue(req.headers["user-agent"]) : undefined;
+
+        // Create rating (includes duplicate check)
+        const rating = await storage.createRating(
+          targetUserId,
+          userId,
+          score,
+          {
+            ipHash,
+            deviceHash,
+            collegeId: user?.collegeId || undefined,
+          }
+        );
+
+        res.json(rating);
+      } catch (error) {
+        console.error("Error creating rating:", error);
+        
+        if (error instanceof Error && error.message === "You have already rated this user") {
+          return res.status(409).json({ message: error.message });
+        }
+        
+        res.status(500).json({ message: "Failed to submit rating" });
+      }
     }
-  });
+  );
 
   // ============ Leaderboard Routes ============
   app.get("/api/leaderboard", isAuthenticated, async (req: any, res) => {
@@ -219,6 +426,72 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ============ Feedback Routes ============
+  app.post("/api/feedback", authLimiter, isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      // Validate input
+      const validation = insertFeedbackSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ 
+          message: "Invalid feedback data",
+          errors: validation.error.errors 
+        });
+      }
+
+      const feedbackRecord = await storage.createFeedback(userId, validation.data);
+      res.json(feedbackRecord);
+    } catch (error) {
+      console.error("Error creating feedback:", error);
+      res.status(500).json({ message: "Failed to submit feedback" });
+    }
+  });
+
+  app.get("/api/feedback", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = getUserId(req);
+      const userFeedback = await storage.getUserFeedback(userId);
+      res.json(userFeedback);
+    } catch (error) {
+      console.error("Error fetching feedback:", error);
+      res.status(500).json({ message: "Failed to fetch feedback" });
+    }
+  });
+
+  // ============ Appeals Routes ============
+  app.post("/api/appeals", authLimiter, isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      // Validate input
+      const validation = insertAppealSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ 
+          message: "Invalid appeal data",
+          errors: validation.error.errors 
+        });
+      }
+
+      const appeal = await storage.createAppeal(userId, validation.data);
+      res.json(appeal);
+    } catch (error) {
+      console.error("Error creating appeal:", error);
+      res.status(500).json({ message: "Failed to submit appeal" });
+    }
+  });
+
+  app.get("/api/appeals", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = getUserId(req);
+      const appeals = await storage.getUserAppeals(userId);
+      res.json(appeals);
+    } catch (error) {
+      console.error("Error fetching appeals:", error);
+      res.status(500).json({ message: "Failed to fetch appeals" });
+    }
+  });
+
   // ============ Admin Routes (for testing) ============
   app.post("/api/admin/compute-leaderboard", isAuthenticated, async (req: any, res) => {
     try {
@@ -236,6 +509,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ message: "Failed to compute leaderboard" });
     }
   });
+
+  // Monitoring endpoints
+  app.get("/api/admin/stats", isAuthenticated, async (req: any, res) => {
+    try {
+      const stats = monitoring.getPerformanceStats();
+      const endpointStats = monitoring.getEndpointStats();
+      const recentErrors = monitoring.getRecentErrors(5);
+      
+      res.json({
+        performance: stats,
+        endpoints: endpointStats,
+        recentErrors,
+      });
+    } catch (error) {
+      console.error("Error fetching stats:", error);
+      res.status(500).json({ message: "Failed to fetch stats" });
+    }
+  });
+
+  app.get("/api/admin/feedback", isAuthenticated, async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const allFeedback = await storage.getAllFeedback(limit);
+      res.json(allFeedback);
+    } catch (error) {
+      console.error("Error fetching feedback:", error);
+      res.status(500).json({ message: "Failed to fetch feedback" });
+    }
+  });
+
+  // Error handling middleware (must be last)
+  app.use(monitoring.errorMiddleware());
 
   const httpServer = createServer(app);
   return httpServer;
