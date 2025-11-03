@@ -66,6 +66,9 @@ export interface IStorage {
   // Leaderboard operations
   getLeaderboard(collegeId: string, periodType?: string): Promise<(Leaderboard & { user?: User })[]>;
   computeLeaderboard(collegeId: string): Promise<void>;
+  
+  // Recent activity
+  getRecentActivity(userId: string, limit: number): Promise<any[]>;
 }
 
 // Helper function to hash rater ID for anonymity
@@ -464,6 +467,47 @@ export class DatabaseStorage implements IStorage {
       .from(feedback)
       .orderBy(desc(feedback.createdAt))
       .limit(limit);
+  }
+
+  // Recent activity - get recent ratings given by the user
+  async getRecentActivity(userId: string, limit: number = 20): Promise<any[]> {
+    const raterIdHash = hashRaterId(userId);
+    
+    const recentRatings = await db
+      .select({
+        id: ratings.id,
+        score: ratings.score,
+        createdAt: ratings.createdAt,
+        targetUserId: ratings.targetUserId,
+        targetUser: {
+          id: users.id,
+          firstName: users.firstName,
+          lastName: users.lastName,
+          displayName: users.displayName,
+          profileImageUrl: users.profileImageUrl,
+          gender: users.gender,
+        },
+      })
+      .from(ratings)
+      .innerJoin(users, eq(ratings.targetUserId, users.id))
+      .where(eq(ratings.raterIdHash, raterIdHash))
+      .orderBy(desc(ratings.createdAt))
+      .limit(limit);
+
+    return recentRatings.map(rating => {
+      const targetName = rating.targetUser.displayName || 
+        `${rating.targetUser.firstName || ''} ${rating.targetUser.lastName || ''}`.trim() || 
+        'Anonymous';
+      
+      return {
+        id: rating.id,
+        type: 'rating_given',
+        score: rating.score,
+        createdAt: rating.createdAt,
+        targetUser: rating.targetUser,
+        message: `You rated ${targetName} ${rating.score}/10`,
+      };
+    });
   }
 }
 

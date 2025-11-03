@@ -9,20 +9,24 @@ interface AuthResponse {
 }
 
 export function useAuth(): AuthResponse {
-  const { data: user, isLoading } = useQuery<User>({
+  const { data: user, isLoading } = useQuery<User | null>({
     queryKey: ["/api/auth/user"],
     queryFn: async () => {
-      const response = await fetch("/api/auth/user");
+      const response = await fetch("/api/auth/user", {
+        credentials: "include",
+      });
       if (!response.ok) {
-        throw new Error("Not authenticated");
+        return null;
       }
-      return response.json();
+      const data = await response.json();
+      return data;
     },
     retry: false,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
   return {
-    user,
+    user: user || undefined,
     isLoading,
     isAuthenticated: !!user,
   };

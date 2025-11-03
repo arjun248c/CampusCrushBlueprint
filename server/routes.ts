@@ -2,7 +2,7 @@ import type { Express, Request } from "express";
 import express from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertRatingSchema, insertAppealSchema, insertFeedbackSchema } from "@shared/schema";
+import { insertRatingSchema, insertAppealSchema, insertFeedbackSchema, users, ratings } from "../shared/schema";
 import { createHash } from "crypto";
 import rateLimit from "express-rate-limit";
 import { monitoring } from "./monitoring";
@@ -93,18 +93,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }),
     secret: process.env.SESSION_SECRET || 'campus-crush-secret-key',
     resave: false,
-    saveUninitialized: false,
+    saveUninitialized: true, // Changed to true for development
     cookie: {
-      secure: process.env.NODE_ENV === 'production',
+      secure: false, // Set to false for development
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000 // 24 hours
-    }
+    },
+    name: 'campus-crush-session'
   }));
 
   // ============ Auth Routes ============
   app.post("/api/auth/login", authLimiter, async (req: any, res) => {
     try {
       const { email, password } = req.body;
+      console.log('Login attempt:', { email, hasPassword: !!password });
       
       if (!email || !password) {
         return res.status(400).json({ message: "Email and password required" });
@@ -117,7 +119,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       req.session.userId = user.id;
-      res.json({ user, message: "Login successful" });
+      console.log('Session after login:', req.session);
+      
+      // Save session explicitly
+      await new Promise((resolve, reject) => {
+        req.session.save((err: any) => {
+          if (err) {
+            console.error('Session save error:', err);
+            reject(err);
+          } else {
+            console.log('Session saved successfully');
+            resolve(undefined);
+          }
+        });
+      });
+      
+      res.json({ user, message: "Login successful", sessionId: req.sessionID });
     } catch (error) {
       console.error("Login error:", error);
       res.status(500).json({ message: "Login failed" });
@@ -152,13 +169,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/auth/user", 
-    (req, res, next) => checkCustomRateLimit(req, res, next, "login"),
     authLimiter, 
-    isAuthenticated, 
     async (req: any, res) => {
       try {
+        console.log('Auth check - Session:', req.session);
+        console.log('Auth check - SessionID:', req.sessionID);
         const userId = getUserId(req);
+        console.log('Auth check - UserId:', userId);
+        
+        if (!userId) {
+          console.log('No user ID in session, returning null');
+          return res.json(null);
+        }
+        
         const user = await storage.getUser(userId);
+        console.log('User found:', !!user, user?.id);
         res.json(user);
       } catch (error) {
         console.error("Error fetching user:", error);
@@ -336,12 +361,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     (req, res, next) => checkCustomRateLimit(req, res, next, "rating"),
     isAuthenticated, 
     async (req: any, res) => {
+      console.log('=== RATING SUBMISSION START ===');
+      console.log('Request body:', req.body);
+      console.log('Session:', req.session);
+      
       try {
         const userId = getUserId(req);
+        console.log('User ID from session:', userId);
+        
+        if (!userId) {
+          console.log('No user ID found in session');
+          return res.status(401).json({ message: "Authentication required" });
+        }
         
         // Validate input
         const validation = insertRatingSchema.safeParse(req.body);
         if (!validation.success) {
+          console.log('Validation failed:', validation.error.errors);
           return res.status(400).json({ 
             message: "Invalid rating data",
             errors: validation.error.errors 
@@ -349,30 +385,59 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         const { targetUserId, score } = validation.data;
+        console.log('Validated data:', { targetUserId, score });
 
         // Prevent self-rating
         if (targetUserId === userId) {
+          console.log('Self-rating attempt blocked');
           return res.status(400).json({ message: "You cannot rate yourself" });
         }
 
         // Get user and target user
         const user = await storage.getUser(userId);
         const targetUser = await storage.getUser(targetUserId);
+        console.log('Users found:', { 
+          rater: !!user, 
+          target: !!targetUser,
+          raterGender: user?.gender,
+          targetGender: targetUser?.gender,
+          raterCollege: user?.collegeId,
+          targetCollege: targetUser?.collegeId
+        });
+
+        if (!user) {
+          console.log('Rater user not found');
+          return res.status(404).json({ message: "Your profile not found" });
+        }
 
         if (!targetUser) {
+          console.log('Target user not found');
           return res.status(404).json({ message: "User not found" });
         }
 
+        // Check if users have required fields
+        if (!user.collegeId || !user.gender) {
+          console.log('Rater missing required fields:', { collegeId: user.collegeId, gender: user.gender });
+          return res.status(400).json({ message: "Please complete your profile first" });
+        }
+
+        if (!targetUser.collegeId || !targetUser.gender) {
+          console.log('Target user missing required fields');
+          return res.status(400).json({ message: "Target user profile incomplete" });
+        }
+
         // Verify both users are from same college
-        if (user?.collegeId !== targetUser?.collegeId) {
+        if (user.collegeId !== targetUser.collegeId) {
+          console.log('College mismatch:', { rater: user.collegeId, target: targetUser.collegeId });
           return res.status(403).json({ message: "You can only rate users from your college" });
         }
 
         // Verify opposite gender
         const isOppositeGender = 
-          (user?.gender === "male" && targetUser?.gender === "female") ||
-          (user?.gender === "female" && targetUser?.gender === "male");
+          (user.gender === "male" && targetUser.gender === "female") ||
+          (user.gender === "female" && targetUser.gender === "male");
 
+        console.log('Gender check:', { isOppositeGender, raterGender: user.gender, targetGender: targetUser.gender });
         if (!isOppositeGender) {
           return res.status(403).json({ message: "You can only rate opposite gender students" });
         }
@@ -380,6 +445,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Create metadata for abuse prevention
         const ipHash = req.ip ? hashValue(req.ip) : undefined;
         const deviceHash = req.headers["user-agent"] ? hashValue(req.headers["user-agent"]) : undefined;
+        console.log('Creating rating with metadata:', { ipHash: !!ipHash, deviceHash: !!deviceHash });
 
         // Create rating (includes duplicate check)
         const rating = await storage.createRating(
@@ -389,10 +455,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           {
             ipHash,
             deviceHash,
-            collegeId: user?.collegeId || undefined,
+            collegeId: user.collegeId,
           }
         );
 
+        console.log('Rating created successfully:', rating.id);
+        console.log('=== RATING SUBMISSION END ===');
         res.json(rating);
       } catch (error) {
         console.error("Error creating rating:", error);
@@ -405,6 +473,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     }
   );
+
+  // ============ Recent Activity Routes ============
+  app.get("/api/recent-activity", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = getUserId(req);
+      const limit = parseInt(req.query.limit as string) || 20;
+      
+      const activities = await storage.getRecentActivity(userId, limit);
+      res.json(activities);
+    } catch (error) {
+      console.error("Error fetching recent activity:", error);
+      res.status(500).json({ message: "Failed to fetch recent activity" });
+    }
+  });
 
   // ============ Leaderboard Routes ============
   app.get("/api/leaderboard", isAuthenticated, async (req: any, res) => {

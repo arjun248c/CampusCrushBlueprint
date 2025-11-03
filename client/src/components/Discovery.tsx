@@ -11,9 +11,11 @@ import type { User } from "@shared/schema";
 interface SwipeableProfileProps {
   user: User;
   onRate: (score: number) => void;
+  onRatingChange: (rating: number, isShowing: boolean) => void;
+  isAnimating?: boolean;
 }
 
-function SwipeableProfile({ user, onRate }: SwipeableProfileProps) {
+function SwipeableProfile({ user, onRate, onRatingChange, isAnimating = false }: SwipeableProfileProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [dragX, setDragX] = useState(0);
   const [showRatingOverlay, setShowRatingOverlay] = useState(false);
@@ -24,6 +26,7 @@ function SwipeableProfile({ user, onRate }: SwipeableProfileProps) {
   const displayName = user.displayName || `${user.firstName || ""} ${user.lastName || ""}`.trim() || "Anonymous";
 
   const handleTouchStart = (e: React.TouchEvent) => {
+    if (isAnimating) return;
     setIsDragging(true);
     startX.current = e.touches[0].clientX;
   };
@@ -38,15 +41,26 @@ function SwipeableProfile({ user, onRate }: SwipeableProfileProps) {
       setShowRatingOverlay(true);
       const rating = Math.min(10, Math.max(1, Math.ceil((Math.abs(deltaX) - 50) / 30) + 1));
       setSelectedRating(rating);
+      onRatingChange(rating, true);
     } else {
       setShowRatingOverlay(false);
       setSelectedRating(0);
+      onRatingChange(0, false);
     }
   };
 
   const handleTouchEnd = () => {
     if (Math.abs(dragX) > 100 && selectedRating > 0) {
-      onRate(selectedRating);
+      // Add exit animation before rating
+      if (cardRef.current) {
+        cardRef.current.style.transform = `translateX(${dragX > 0 ? '100%' : '-100%'}) rotate(${dragX * 0.2}deg)`;
+        cardRef.current.style.opacity = '0';
+      }
+      
+      // Submit rating after short delay for animation
+      setTimeout(() => {
+        onRate(selectedRating);
+      }, 200);
     }
     setIsDragging(false);
     setDragX(0);
@@ -55,6 +69,7 @@ function SwipeableProfile({ user, onRate }: SwipeableProfileProps) {
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (isAnimating) return;
     setIsDragging(true);
     startX.current = e.clientX;
   };
@@ -69,20 +84,32 @@ function SwipeableProfile({ user, onRate }: SwipeableProfileProps) {
           setShowRatingOverlay(true);
           const rating = Math.min(10, Math.max(1, Math.ceil((Math.abs(deltaX) - 50) / 30) + 1));
           setSelectedRating(rating);
+          onRatingChange(rating, true);
         } else {
           setShowRatingOverlay(false);
           setSelectedRating(0);
+          onRatingChange(0, false);
         }
       };
 
       const handleGlobalMouseUp = () => {
         if (Math.abs(dragX) > 100 && selectedRating > 0) {
-          onRate(selectedRating);
+          // Add exit animation before rating
+          if (cardRef.current) {
+            cardRef.current.style.transform = `translateX(${dragX > 0 ? '100%' : '-100%'}) rotate(${dragX * 0.2}deg)`;
+            cardRef.current.style.opacity = '0';
+          }
+          
+          // Submit rating after short delay for animation
+          setTimeout(() => {
+            onRate(selectedRating);
+          }, 200);
         }
         setIsDragging(false);
         setDragX(0);
         setShowRatingOverlay(false);
         setSelectedRating(0);
+        onRatingChange(0, false);
       };
 
       document.addEventListener('mousemove', handleGlobalMouseMove);
@@ -125,14 +152,7 @@ function SwipeableProfile({ user, onRate }: SwipeableProfileProps) {
           </div>
         )}
 
-        {showRatingOverlay && (
-          <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-            <div className="bg-white/90 backdrop-blur-sm rounded-2xl px-6 py-4 text-center">
-              <div className="text-4xl font-bold text-purple-600 mb-2">{selectedRating}</div>
-              <div className="text-sm text-gray-700">Release to rate</div>
-            </div>
-          </div>
-        )}
+
 
         <div className="absolute bottom-0 left-0 right-0 p-6 text-white">
           <h3 className="text-xl font-semibold mb-1">
@@ -168,6 +188,8 @@ export default function Discovery() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchMode, setIsSearchMode] = useState(false);
+  const [globalRating, setGlobalRating] = useState({ rating: 0, isShowing: false });
+  const [isAnimating, setIsAnimating] = useState(false);
 
   const { data: profiles = [], isLoading, refetch } = useQuery<User[]>({
     queryKey: isSearchMode ? ["/api/profiles/search", searchQuery] : ["/api/profiles/random"],
@@ -182,18 +204,23 @@ export default function Discovery() {
 
   const submitRating = useMutation({
     mutationFn: async ({ targetUserId, score }: { targetUserId: string; score: number }) => {
-      await apiRequest("POST", "/api/ratings", { targetUserId, score });
+      console.log('Submitting rating:', { targetUserId, score });
+      const result = await apiRequest("POST", "/api/ratings", { targetUserId, score });
+      console.log('Rating submission result:', result);
+      return result;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
+      console.log('Rating submitted successfully:', data);
       toast({
         title: "Rating Submitted!",
         description: "Your anonymous rating has been recorded.",
       });
-      setCurrentIndex(prev => prev + 1);
       queryClient.invalidateQueries({ queryKey: ["/api/profiles/random"] });
       queryClient.invalidateQueries({ queryKey: ["/api/leaderboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/recent-activity"] });
     },
     onError: (error: Error) => {
+      console.error('Rating submission error:', error);
       if (isUnauthorizedError(error)) {
         toast({
           title: "Unauthorized",
@@ -205,18 +232,43 @@ export default function Discovery() {
         }, 500);
         return;
       }
-      toast({
-        title: "Error",
-        description: error.message || "Failed to submit rating",
-        variant: "destructive",
-      });
+      
+      // Handle duplicate rating case
+      if (error.message?.includes("already rated")) {
+        toast({
+          title: "Already Rated",
+          description: "You've already rated this person. Moving to next profile.",
+        });
+      } else {
+        toast({
+          title: "Error",
+          description: error.message || "Failed to submit rating",
+          variant: "destructive",
+        });
+      }
     },
   });
 
   const handleRate = (score: number) => {
+    if (isAnimating) return; // Prevent multiple rapid ratings
+    
     const currentProfile = profiles[currentIndex];
+    console.log('handleRate called:', { score, currentProfile: currentProfile?.id });
     if (currentProfile) {
+      setIsAnimating(true);
+      
+      // Immediately advance to next profile
+      setCurrentIndex(prev => prev + 1);
+      
+      // Submit the rating in background
       submitRating.mutate({ targetUserId: currentProfile.id, score });
+      
+      // Reset animation state after transition
+      setTimeout(() => {
+        setIsAnimating(false);
+      }, 500);
+    } else {
+      console.error('No current profile to rate');
     }
   };
 
@@ -336,10 +388,57 @@ export default function Discovery() {
         )}
       </div>
 
-      <SwipeableProfile
-        user={currentProfile}
-        onRate={handleRate}
-      />
+      <div className="relative">
+        {/* Next Profile (Background) */}
+        {profiles[currentIndex + 1] && (
+          <div className="absolute inset-0 z-0 transition-all duration-500 ease-out">
+            <div className="aspect-[3/4] rounded-3xl overflow-hidden shadow-xl blur-sm opacity-50 scale-95 transition-all duration-500">
+              <img
+                src={profiles[currentIndex + 1].profileImageUrl || "https://via.placeholder.com/400x600"}
+                alt="Next profile"
+                className="w-full h-full object-cover"
+              />
+            </div>
+          </div>
+        )}
+        
+        {/* Current Profile (Foreground) */}
+        <div className="relative z-10 transition-all duration-300 ease-out" key={currentProfile.id}>
+          <SwipeableProfile
+            user={currentProfile}
+            onRate={handleRate}
+            onRatingChange={(rating, isShowing) => setGlobalRating({ rating, isShowing })}
+            isAnimating={isAnimating}
+          />
+        </div>
+      </div>
+      
+      {/* Global Rating Overlay */}
+      {globalRating.isShowing && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 pointer-events-none">
+          <div className="relative w-64 h-40">
+            {/* Half Circle Gauge */}
+            <svg className="w-full h-full" viewBox="0 0 200 120">
+              {/* Needle */}
+              <g className="transition-transform duration-500 ease-out" style={{ transformOrigin: '100px 100px', transform: `rotate(${-90 + (globalRating.rating / 10) * 180}deg)` }}>
+                <line x1="100" y1="100" x2="100" y2="65" stroke={`rgb(${255}, ${255 - (globalRating.rating / 10) * 255}, ${255 - (globalRating.rating / 10) * 255})`} strokeWidth="3" strokeLinecap="round" />
+                <text x="100" y="60" textAnchor="middle" dominantBaseline="middle" fill={`rgb(${255}, ${255 - (globalRating.rating / 10) * 255}, ${255 - (globalRating.rating / 10) * 255})`} fontSize="24">
+                  ♥
+                </text>
+                <circle cx="100" cy="100" r="6" fill={`rgb(${255}, ${255 - (globalRating.rating / 10) * 255}, ${255 - (globalRating.rating / 10) * 255})`} />
+              </g>
+              <text x="100" y="82" textAnchor="middle" dominantBaseline="middle" fill="white" fontSize="14" fontWeight="bold">
+                {globalRating.rating}
+              </text>
+            </svg>
+            
+            {/* Center Display */}
+            <div className="absolute bottom-0 left-1/2 transform -translate-x-1/2 text-center">
+              <div className="text-xs text-white/80 font-medium">CRUSH METER</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex justify-center mt-4">
         <div className="bg-muted rounded-full px-4 py-2 text-sm text-muted-foreground">

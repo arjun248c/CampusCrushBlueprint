@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
@@ -29,14 +29,31 @@ export default function Profile() {
       return response.json();
     },
     enabled: !!user,
-    onSuccess: (data) => {
+  });
+
+  // Fetch recent activity
+  const { data: recentActivity = [], isLoading: activityLoading } = useQuery({
+    queryKey: ["/api/recent-activity"],
+    queryFn: async () => {
+      const response = await fetch("/api/recent-activity?limit=10");
+      if (!response.ok) throw new Error("Failed to fetch recent activity");
+      const data = await response.json();
+      console.log('Recent activity:', data);
+      return data;
+    },
+    enabled: !!user,
+  });
+
+  // Update edit data when profile loads
+  useEffect(() => {
+    if (profile) {
       setEditData({
-        displayName: data.displayName || "",
-        bio: data.bio || "",
+        displayName: profile.displayName || "",
+        bio: profile.bio || "",
         profileImage: null,
       });
-    },
-  });
+    }
+  }, [profile]);
 
   // Update profile mutation
   const updateProfile = useMutation({
@@ -238,10 +255,39 @@ export default function Profile() {
 
       {/* Recent Activity */}
       <div className="bg-card rounded-2xl p-6 border border-card-border">
-        <h2 className="text-2xl font-bold font-display mb-4">Recent Activity</h2>
-        <div className="text-center py-12 text-muted-foreground">
-          <p>No recent activity</p>
-        </div>
+        <h2 className="text-2xl font-bold font-display mb-4">Recent Ratings</h2>
+        {activityLoading ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <p>Loading...</p>
+          </div>
+        ) : recentActivity.length > 0 ? (
+          <div className="space-y-4">
+            {recentActivity.map((activity: any) => (
+              <div key={activity.id} className="flex items-center gap-4 p-4 bg-muted/50 rounded-lg">
+                <img
+                  src={activity.targetUser?.profileImageUrl || "https://via.placeholder.com/48"}
+                  alt={activity.targetUser?.displayName || "User"}
+                  className="size-12 rounded-full object-cover"
+                />
+                <div className="flex-1">
+                  <p className="font-medium">{activity.message}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {new Date(activity.createdAt).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div className="text-lg font-bold text-primary">★ {activity.score}/10</div>
+                  <div className="text-xs text-muted-foreground">Rating Given</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-12 text-muted-foreground">
+            <p>No recent ratings given</p>
+            <p className="text-xs mt-1">Rate some profiles to see activity here</p>
+          </div>
+        )}
       </div>
     </div>
   );
