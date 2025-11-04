@@ -7,11 +7,8 @@ import { createHash } from "crypto";
 import rateLimit from "express-rate-limit";
 import { monitoring } from "./monitoring";
 import session from "express-session";
-import MemoryStore from "memorystore";
 import multer from "multer";
 import path from "path";
-
-const MemoryStoreSession = MemoryStore(session);
 
 // Helper to get user ID from request
 function getUserId(req: any): string {
@@ -88,14 +85,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Session middleware
   app.use(session({
-    store: new MemoryStoreSession({
-      checkPeriod: 86400000 // prune expired entries every 24h
-    }),
     secret: process.env.SESSION_SECRET || 'campus-crush-secret-key',
     resave: false,
-    saveUninitialized: true, // Changed to true for development
+    saveUninitialized: true,
     cookie: {
-      secure: false, // Set to false for development
+      secure: false,
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000 // 24 hours
     },
